@@ -1,0 +1,26 @@
+# Backblaze B2 through its S3-compatible API. Use an application key restricted to one bucket.
+# The endpoint and region are shown on the bucket page ("Endpoint: s3.us-west-004.backblazeb2.com").
+
+[backup]
+prefix = "cloudpanel"
+
+[storage]
+type = "s3"
+bucket = "vps-backups"
+endpoint = "https://s3.us-west-004.backblazeb2.com"
+region = "us-west-004"
+access_key_env = "B2_KEY_ID"
+secret_key_env = "B2_APPLICATION_KEY"  # name of the environment variable, not a key  gitleaks:allow
+
+[encryption]
+method = "gpg"
+gpg_recipient = "backups@example.com"
+
+[retention]
+daily = 14
+weekly = 8
+monthly = 6
+
+[notify]
+on = "always"
+webhook_url_env = "CPB_WEBHOOK_URL"

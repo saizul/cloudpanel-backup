@@ -1,0 +1,30 @@
+# Cloudflare R2. Create an R2 API token with "Object Read & Write" on one bucket and put the keys in
+# /etc/cloudpanel-backup/env:
+#   CPB_S3_ACCESS_KEY_ID=...
+#   CPB_S3_SECRET_ACCESS_KEY=...
+
+[backup]
+prefix = "cloudpanel"
+sites = ["*"]
+exclude_sites = ["staging.*"]
+
+[storage]
+type = "s3"
+bucket = "vps-backups"
+endpoint = "https://<account-id>.r2.cloudflarestorage.com"
+region = "auto"
+
+[encryption]
+method = "age"
+# The public key of an identity you keep OFF the server (age-keygen -o key.txt prints it).
+recipients = ["age1examplepublickeyreplacewithyourownxxxxxxxxxxxxxxxxxxxxxxxx"]
+
+[retention]
+daily = 7
+weekly = 4
+monthly = 12
+
+[notify]
+on = "failure"
+telegram_bot_token_env = "CPB_TELEGRAM_TOKEN"
+telegram_chat_id = "123456789"

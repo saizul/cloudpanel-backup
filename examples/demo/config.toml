@@ -1,0 +1,21 @@
+# Offline demo: run from the repository root.
+#   cloudpanel-backup --config examples/demo/config.toml discover
+#   cloudpanel-backup --config examples/demo/config.toml backup
+#   cloudpanel-backup --config examples/demo/config.toml verify --deep
+# The vhost root and home_root are relative paths, so the demo works from a checkout.
+
+[backup]
+staging_dir = "demo-output/staging"
+home_root = "examples/demo/home"
+nginx_dir = "examples/demo/nginx"
+host = "demo"
+databases = false
+
+[storage]
+type = "local"
+path = "demo-output/store"
+
+[retention]
+daily = 3
+weekly = 2
+monthly = 2

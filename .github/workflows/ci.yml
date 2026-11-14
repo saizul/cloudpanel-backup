@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .[dev]
+      - name: Ruff
+        run: |
+          ruff check .
+          ruff format --check .
+
+  test:
+    name: Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .[dev]
+      - name: Test
+        run: pytest
+      - name: CLI smoke test (offline demo server)
+        run: |
+          cloudpanel-backup --version
+          cloudpanel-backup init-config > /tmp/sample.toml
+          cloudpanel-backup --config examples/demo/config.toml discover
+          cloudpanel-backup --config examples/demo/config.toml backup --dry-run
+          cloudpanel-backup --config examples/demo/config.toml backup
+          cloudpanel-backup --config examples/demo/config.toml verify --deep --json > verify.json
+          python -c "import json; d = json.load(open('verify.json')); assert d['ok'] and d['results'], d"
+          cloudpanel-backup --config examples/demo/config.toml restore www.demo.example --target /tmp/restored --no-chown
+          test -f /tmp/restored/index.php
+          test ! -e /tmp/restored/wp-content/cache
+          cloudpanel-backup schedule > /dev/null
+          cloudpanel-backup schedule --cron > /dev/null
+          for f in examples/config-*.toml; do cloudpanel-backup --config "$f" discover > /dev/null; done
+
+  docker:
+    name: Docker build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t cloudpanel-backup:ci .
+      - run: docker run --rm cloudpanel-backup:ci --version
+      - run: docker run --rm cloudpanel-backup:ci schedule --cron

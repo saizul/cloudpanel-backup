@@ -1,0 +1,17 @@
+# AWS S3 with boto3 (pip install "cloudpanel-backup[s3]"), which can also use instance roles and ~/.aws.
+
+[storage]
+type = "s3"
+backend = "boto3"
+bucket = "vps-backups-eu"
+region = "eu-central-1"
+storage_class = "STANDARD_IA"
+
+[notify]
+on = "failure"
+email_to = ["ops@example.com"]
+email_from = "backups@example.com"
+smtp_host = "smtp.example.com"
+smtp_port = 587
+smtp_user = "backups@example.com"
+smtp_password_env = "CPB_SMTP_PASSWORD"

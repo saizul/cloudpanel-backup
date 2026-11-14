@@ -1,0 +1,24 @@
+# rsync over SSH to another server or a Hetzner Storage Box (rsync 3.2.3+ on both ends for --mkpath).
+# The SSH key must work without a passphrase prompt (BatchMode=yes).
+
+[backup]
+db_method = "clpctl"            # use 'clpctl db:export' instead of mariadb-dump
+
+[storage]
+type = "rsync"
+target = "backup@203.0.113.10:/srv/backups"
+ssh_port = 22
+ssh_key = "/root/.ssh/cloudpanel-backup"
+
+[retention]
+daily = 7
+weekly = 4
+monthly = 3
+
+[[site]]
+domain = "shop.example.com"
+exclude = ["var/import", "media/catalog/product/cache"]
+
+[[site]]
+domain = "old.example.com"
+skip = true
