@@ -10,7 +10,7 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
-- Discovery skips `htdocs` folders it cannot read (permission denied) with a warning instead of stopping.
+- Discovery skips home and `htdocs` folders it cannot read (permission denied) with a warning instead of stopping.
 
 ## [0.1.0] - 2026-11-14
 
