@@ -124,7 +124,12 @@ def discover_sites(config: Config, runner: CommandRunner | None = None) -> list[
         for user_dir in sorted(home_root.iterdir()):
             if user_dir.name in SYSTEM_USERS or not (user_dir / "htdocs").is_dir():
                 continue
-            for site_dir in sorted((user_dir / "htdocs").iterdir()):
+            try:
+                entries = sorted((user_dir / "htdocs").iterdir())
+            except PermissionError:
+                log.warning("cannot read %s (permission denied); run as root to include it", user_dir / "htdocs")
+                continue
+            for site_dir in entries:
                 if not site_dir.is_dir() or site_dir.is_symlink() or site_dir in sites:
                     continue
                 sites[site_dir] = Site(domain=site_dir.name.lower(), user=user_dir.name, site_dir=site_dir)
