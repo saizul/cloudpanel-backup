@@ -70,6 +70,12 @@ class BackupSettings:
     keep_staging: bool = False
     home_root: Path = Path("/home")
     nginx_dir: Path = Path("/etc/nginx/sites-enabled")
+    # Run lock shared by backup, restore and prune; defaults to <staging_dir>/cloudpanel-backup.lock.
+    lock_file: Path | None = None
+    lock_timeout: int = 0  # seconds to wait for another run to finish; 0 = give up at once
+
+    def lock_path(self) -> Path:
+        return self.lock_file or self.staging_dir / "cloudpanel-backup.lock"
 
     def all_excludes(self, extra: list[str] | None = None) -> list[str]:
         base = list(DEFAULT_EXCLUDES) if self.use_default_excludes else []
@@ -152,6 +158,8 @@ class NotifySettings:
     smtp_password_env: str | None = None
     smtp_starttls: bool = True
     smtp_ssl: bool = False
+    # Name of the environment variable that holds a Healthchecks.io-style ping URL.
+    heartbeat_url_env: str | None = None
 
 
 @dataclass
@@ -199,6 +207,7 @@ _PATH_FIELDS = {
     "recipients_file",
     "identity_file",
     "gpg_homedir",
+    "lock_file",
 }
 _LIST_FIELDS = {
     "sites",
@@ -219,6 +228,7 @@ _INT_FIELDS = {
     "monthly",
     "min_keep",
     "smtp_port",
+    "lock_timeout",
 }
 _BOOL_FIELDS = {
     "use_default_excludes",
@@ -263,6 +273,8 @@ def _validate(cfg: Config) -> None:
         raise ConfigError("[backup] db_method must be 'mariadb-dump' or 'clpctl'")
     if not 0 <= b.compression_level <= 9:
         raise ConfigError("[backup] compression_level must be between 0 and 9")
+    if b.lock_timeout < 0:
+        raise ConfigError("[backup] lock_timeout cannot be negative")
     s = cfg.storage
     if s.type not in ("s3", "local", "rsync"):
         raise ConfigError("[storage] type must be 's3', 'local' or 'rsync'")
@@ -346,6 +358,7 @@ exclude = []                     # extra excludes, added to the built-in list (c
 databases = true
 db_method = "mariadb-dump"       # or "clpctl" (clpctl db:export)
 compression_level = 6
+# lock_timeout = 0               # seconds to wait if another run holds the lock (0 = skip this run)
 
 [database]
 host = "127.0.0.1"
@@ -378,6 +391,7 @@ on = "failure"                   # "always", "failure" or "never"
 # telegram_bot_token_env = "CPB_TELEGRAM_TOKEN"
 # telegram_chat_id = "123456789"
 # webhook_url_env = "CPB_WEBHOOK_URL"
+# heartbeat_url_env = "CPB_HEARTBEAT_URL"   # Healthchecks.io / Uptime Kuma ping URL (start, success, fail)
 
 # [[site]]
 # domain = "shop.example.com"
