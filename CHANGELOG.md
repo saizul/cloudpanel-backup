@@ -6,7 +6,15 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
-## [Unreleased]
+### Added
+
+- Exclusive run lock for `backup`, `restore` and `prune` (an advisory `flock` on
+  `<staging_dir>/cloudpanel-backup.lock`), so a timer run and a manual run never overlap. A refused run names the
+  holder (command, PID, host, start time) and exits with the new code `3`. New `[backup] lock_file` and
+  `lock_timeout` settings and global `--lock-timeout SECONDS` / `--no-lock` options.
+- Heartbeat pings for Healthchecks.io-style monitors: `[notify] heartbeat_url_env` names a variable with the ping
+  URL; `backup` pings `/start`, success or `/fail`, and `test-notify` sends a test ping.
+- `CODE_OF_CONDUCT.md`, issue templates for bug reports and feature requests, and a pull request template.
 
 ### Fixed
 

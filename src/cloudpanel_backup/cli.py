@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import logging
 import os
@@ -17,7 +18,9 @@ from cloudpanel_backup.catalog import find_backup, list_backups
 from cloudpanel_backup.config import SAMPLE_CONFIG, Config, ConfigError, load_config
 from cloudpanel_backup.crypto import Encryptor
 from cloudpanel_backup.discovery import Site, discover_sites, is_cloudpanel
+from cloudpanel_backup.heartbeat import Heartbeat
 from cloudpanel_backup.http import Transport
+from cloudpanel_backup.lock import LockError, RunLock
 from cloudpanel_backup.notify import Event, Notifier, SmtpFactory
 from cloudpanel_backup.restore import RestoreError, RestoreOptions, Restorer
 from cloudpanel_backup.runner import CommandError, CommandRunner, SubprocessRunner
@@ -28,7 +31,7 @@ from cloudpanel_backup.verify import verify_backup
 
 log = logging.getLogger("cloudpanel_backup")
 
-EXIT_OK, EXIT_FAILED, EXIT_USAGE = 0, 1, 2
+EXIT_OK, EXIT_FAILED, EXIT_USAGE, EXIT_LOCKED = 0, 1, 2, 3
 
 
 def load_env_file(path: Path) -> int:
@@ -46,6 +49,16 @@ def load_env_file(path: Path) -> int:
     return count
 
 
+def _non_negative_int(value: str) -> int:
+    try:
+        number = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected a whole number of seconds, got {value!r}") from None
+    if number < 0:
+        raise argparse.ArgumentTypeError("cannot be negative")
+    return number
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="cloudpanel-backup",
@@ -58,6 +71,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("-v", "--verbose", action="count", default=0, help="more output (-vv for debug)")
     parser.add_argument("-q", "--quiet", action="store_true", help="only print errors")
     parser.add_argument("--host", help="host name used in object keys (default: [backup] host or the hostname)")
+    parser.add_argument(
+        "--lock-timeout",
+        type=_non_negative_int,
+        metavar="SECONDS",
+        help="wait this long for another run to release the lock (default: [backup] lock_timeout, 0)",
+    )
+    parser.add_argument(
+        "--no-lock", action="store_true", help="do not take the run lock (backup, restore and prune take it)"
+    )
     sub = parser.add_subparsers(dest="command", required=True, metavar="COMMAND")
 
     p = sub.add_parser("init-config", help="print or write a sample config file")
@@ -155,6 +177,18 @@ class App:
     def notifier(self) -> Notifier:
         return Notifier(self.config.notify, self.transport, self.smtp_factory)
 
+    def heartbeat(self) -> Heartbeat:
+        return Heartbeat(self.config.notify, self.transport)
+
+    def run_lock(self, command: str) -> contextlib.AbstractContextManager[object]:
+        """The exclusive lock for commands that write to the staging area or to storage."""
+        if self.args.no_lock:
+            return contextlib.nullcontext()
+        timeout = self.args.lock_timeout
+        if timeout is None:
+            timeout = self.config.backup.lock_timeout
+        return RunLock(self.config.backup.lock_path(), command, self.host, timeout=timeout)
+
     def selected_sites(self, wanted: list[str]) -> list[Site]:
         sites = discover_sites(self.config, self.runner)
         if wanted:
@@ -208,7 +242,16 @@ class App:
                 for step in runner.plan(site):
                     self.print(f"  - {step}")
             return EXIT_OK
-        report = runner.run(sites, prune=not self.args.no_prune)
+        heartbeat = None if self.args.no_notify else self.heartbeat()
+        with self.run_lock("backup"):
+            if heartbeat is not None:
+                heartbeat.start()
+            try:
+                report = runner.run(sites, prune=not self.args.no_prune)
+            except Exception as exc:
+                if heartbeat is not None:
+                    heartbeat.finish(False, f"backup on {self.host} stopped: {exc}")
+                raise
         if self.args.json:
             self.print(
                 json.dumps(
@@ -224,6 +267,8 @@ class App:
         if not self.args.no_notify:
             event = Event("backup", report.ok, report.host, report.summary(), [r.to_dict() for r in report.results])
             self.notifier().send(event)
+            if heartbeat is not None:
+                heartbeat.finish(report.ok, event.text())
         return EXIT_OK if report.ok else EXIT_FAILED
 
     def cmd_list(self) -> int:
@@ -279,7 +324,9 @@ class App:
             identity_file=a.identity,
             keep_previous=not a.no_keep_previous,
         )
-        steps = Restorer(self.config, self.runner, storage).restore(backup, options)
+        lock = contextlib.nullcontext() if a.dry_run else self.run_lock("restore")
+        with lock:
+            steps = Restorer(self.config, self.runner, storage).restore(backup, options)
         self.print(f"{'restore plan' if a.dry_run else 'restored'}: {backup.domain} {backup.timestamp} from {host}")
         for step in steps:
             self.print(f"  - {step}")
@@ -332,10 +379,14 @@ class App:
         domains = sorted({b.domain for b in list_backups(storage, self.config.backup.prefix, self.host)})
         if self.args.site:
             domains = [d for d in domains if d in {s.lower() for s in self.args.site}]
-        for domain in domains:
-            deleted = runner.prune_site(domain, dry_run=self.args.dry_run)
-            verb = "would delete" if self.args.dry_run else "deleted"
-            self.print(f"{domain}: {verb} {len(deleted)} backup(s)" + (f": {', '.join(deleted)}" if deleted else ""))
+        lock = contextlib.nullcontext() if self.args.dry_run else self.run_lock("prune")
+        with lock:
+            for domain in domains:
+                deleted = runner.prune_site(domain, dry_run=self.args.dry_run)
+                verb = "would delete" if self.args.dry_run else "deleted"
+                self.print(
+                    f"{domain}: {verb} {len(deleted)} backup(s)" + (f": {', '.join(deleted)}" if deleted else "")
+                )
         return EXIT_OK
 
     def cmd_schedule(self) -> int:
@@ -364,12 +415,20 @@ class App:
     def cmd_test_notify(self) -> int:
         notifier = self.notifier()
         channels = notifier.channels()
-        if not channels:
+        heartbeat = self.heartbeat()
+        if not channels and not heartbeat.enabled:
             self.print("no notification channels configured")
             return EXIT_FAILED
-        failed = notifier.send(Event("test", True, self.host, "This is a test notification."))
+        failed = notifier.send(Event("test", True, self.host, "This is a test notification.")) if channels else []
         for channel in channels:
             self.print(f"{channel}: {'FAILED' if channel in failed else 'sent'}")
+        if heartbeat.enabled:
+            # a success ping: it marks the check as up, which is what a working setup should show
+            if heartbeat.finish(True, f"cloudpanel-backup test ping from {self.host}"):
+                self.print("heartbeat: sent")
+            else:
+                self.print("heartbeat: FAILED")
+                failed.append("heartbeat")
         return EXIT_FAILED if failed else EXIT_OK
 
 
@@ -394,6 +453,9 @@ def main(
     except ConfigError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_USAGE
+    except LockError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return EXIT_LOCKED
     except (StorageError, RestoreError, CommandError, OSError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_FAILED

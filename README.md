@@ -42,7 +42,9 @@ api.example.com                          ok      3.1 MiB (2s)
 - [Retention](#retention)
 - [Restore](#restore)
 - [Scheduling](#scheduling)
+- [Run lock](#run-lock)
 - [Notifications](#notifications)
+- [Heartbeat monitoring](#heartbeat-monitoring)
 - [Examples](#examples)
 - [Testing](#testing)
 - [Security notes](#security-notes)
@@ -78,9 +80,11 @@ api.example.com                          ok      3.1 MiB (2s)
 - **Restore**: dry-run plan, checksum verification before anything is touched, extraction into a fresh directory
   with protection against path traversal, the old files moved aside instead of deleted, database import into the
   same or another database (`--db-map old=new`), ownership fixed for the site user.
-- **Scheduling**: prints or installs a systemd service and timer, or a `/etc/cron.d` line.
+- **Scheduling**: prints or installs a systemd service and timer, or a `/etc/cron.d` line. An exclusive run lock
+  keeps a timer run and a manual run (or a long backup and the next timer run) from overlapping.
 - **Notifications**: Telegram, a JSON webhook (Slack/Discord bridges, n8n, healthchecks) and email over SMTP, on
-  failure only or always.
+  failure only or always, plus heartbeat pings (start, success, fail) for Healthchecks.io-style monitors that also
+  alert when a scheduled run never happens.
 
 ## Installation
 
@@ -139,7 +143,8 @@ cloudpanel-backup schedule --install && systemctl daemon-reload && systemctl ena
 ## Usage
 
 ```text
-cloudpanel-backup [--config FILE] [--env-file FILE] [--host NAME] [-v|-q] COMMAND
+cloudpanel-backup [--config FILE] [--env-file FILE] [--host NAME] [--lock-timeout SECONDS] [--no-lock] [-v|-q]
+                  COMMAND
 
   init-config   print or write a sample config file (--output, mode 0600)
   discover      list the sites and databases that would be backed up (--json)
@@ -151,10 +156,11 @@ cloudpanel-backup [--config FILE] [--env-file FILE] [--host NAME] [-v|-q] COMMAN
   verify        check the latest backup of each site (--all, --deep, --site, --identity, --json)
   prune         apply the retention policy (--site, --dry-run)
   schedule      print systemd units (or --cron); --install writes them, --verify-after adds a verify run
-  test-notify   send a test message to every configured channel
+  test-notify   send a test message to every configured channel (and a heartbeat ping, if configured)
 ```
 
-Exit codes: `0` success, `1` a backup, verify or restore failed, `2` configuration or usage error.
+Exit codes: `0` success, `1` a backup, verify or restore failed, `2` configuration or usage error, `3` another run
+holds the [run lock](#run-lock).
 
 ## Configuration
 
@@ -175,6 +181,8 @@ variables in `/etc/cloudpanel-backup/env` (`KEY=value`, mode 0600); the systemd 
 | | `db_method` | `mariadb-dump` | or `clpctl` |
 | | `compression_level` | `6` | gzip level 0-9 |
 | | `home_root` / `nginx_dir` | `/home` / `/etc/nginx/sites-enabled` | where to look for sites |
+| | `lock_file` | `<staging_dir>/cloudpanel-backup.lock` | the [run lock](#run-lock) |
+| | `lock_timeout` | `0` | seconds to wait for another run before giving up |
 | `[database]` | `user`, `password_env` | unset | one account for every database (for example a backup user) |
 | | `host`, `port` | `127.0.0.1`, `3306` | used with `user` |
 | | `use_master_credentials` | `true` | fall back to `clpctl db:show:master-credentials` |
@@ -191,6 +199,7 @@ variables in `/etc/cloudpanel-backup/env` (`KEY=value`, mode 0600); the systemd 
 | | `gpg_recipient`, `gpg_homedir`, `gpg_passphrase_env` | | GnuPG |
 | `[retention]` | `daily`, `weekly`, `monthly`, `min_keep` | `7`, `4`, `6`, `1` | see [Retention](#retention) |
 | `[notify]` | `on` | `failure` | `always`, `failure` or `never` |
+| | `heartbeat_url_env` | unset | variable holding a [heartbeat](#heartbeat-monitoring) ping URL |
 | `[[site]]` | `domain`, `skip`, `databases`, `exclude`, `path` | | per-site overrides |
 
 Exclude patterns are relative to the site directory. A pattern without `/` (`node_modules`, `*.log`) matches a
@@ -306,6 +315,26 @@ The service is a `Type=oneshot` unit with `Nice=10`, `IOSchedulingClass=idle`, `
 the timer runs daily at 02:30 with a random delay of up to 15 minutes and catches up after downtime
 (`Persistent=true`). `--on-calendar` changes the time, `--verify-after` adds a `verify` run.
 
+## Run lock
+
+`backup`, `restore` and `prune` take an exclusive lock before they touch the staging directory or the storage, so
+two runs never build the same staging folder, upload into the same backup set, or prune a backup that is being
+restored. Read-only commands (`list`, `verify`, `discover`) and `--dry-run` runs do not take it.
+
+The lock is an advisory `flock` on `<staging_dir>/cloudpanel-backup.lock` (mode 0600; set `[backup] lock_file` to
+move it, for example to `/run/cloudpanel-backup.lock`). The kernel drops it when the process exits, even after a
+crash or `kill -9`, so a leftover file never blocks later runs. While held, the file names the command, PID, host
+and start time, and a refused run prints them:
+
+```text
+error: another cloudpanel-backup run holds /var/backups/cloudpanel-backup/cloudpanel-backup.lock
+(backup, pid 4121, on vps1, since 2026-11-17T02:31:09Z)
+```
+
+By default a second run gives up at once with exit code `3`. `[backup] lock_timeout = 600` (or `--lock-timeout
+600`) makes it wait up to ten minutes first. `--no-lock` skips the lock; use it only when you are sure nothing else
+is running. With `schedule --cron --verify-after`, a refused backup also skips the verify run.
+
 ## Notifications
 
 ```toml
@@ -325,6 +354,29 @@ smtp_password_env = "CPB_SMTP_PASSWORD"
 The webhook receives a JSON body with `source`, `action` (`backup` or `verify`), `ok`, `host`, `title`, `summary`,
 `text` and `details` (one entry per site). Webhooks must use HTTPS. A failing notification is logged and never
 fails the backup. `cloudpanel-backup test-notify` checks the setup.
+
+## Heartbeat monitoring
+
+Notifications only arrive when a run finishes. If the timer is disabled, the server is down or a run hangs, nothing
+is sent at all. A heartbeat monitor ([Healthchecks.io](https://healthchecks.io), a self-hosted Healthchecks, or an
+Uptime Kuma push monitor) catches that: it expects a ping on a schedule and alerts when one is late.
+
+```toml
+[notify]
+heartbeat_url_env = "CPB_HEARTBEAT_URL"
+```
+
+```bash
+# /etc/cloudpanel-backup/env (mode 0600): the ping URL includes the check's secret id
+CPB_HEARTBEAT_URL=https://hc-ping.com/<your-check-uuid>
+```
+
+`backup` sends `POST <url>/start` when it begins (after taking the run lock), `POST <url>` when every site
+succeeded and `POST <url>/fail` otherwise, or when the run stops with an error. The body is the plain-text run
+summary (the first 10 kB), so it shows up in the monitor's event log. The URL must use HTTPS and is never logged.
+A failed ping is logged as a warning and does not fail the backup. Dry runs and `--no-notify` runs send no pings,
+and neither does a run refused by the run lock (the run holding the lock pings when it finishes).
+`cloudpanel-backup test-notify` sends one success ping to check the URL.
 
 ## Examples
 
@@ -371,6 +423,7 @@ build.
 - Staging directories are created with mode 0700, uploaded local files with 0600, and the systemd unit uses
   `UMask=0077`.
 - The S3 client refuses plain-HTTP endpoints except `localhost`/`127.0.0.1` (for a local MinIO).
+- The run lock file is opened with `O_NOFOLLOW`, so a symlink planted in its place is refused instead of followed.
 
 ## Limitations
 
@@ -394,7 +447,8 @@ build.
 ## Contributing
 
 Bug reports and pull requests are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for the development setup and
-guidelines, and [SECURITY.md](SECURITY.md) for reporting vulnerabilities.
+guidelines, [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for community standards, and [SECURITY.md](SECURITY.md)
+for reporting vulnerabilities.
 
 ## License
 

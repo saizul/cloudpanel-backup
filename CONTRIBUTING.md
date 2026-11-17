@@ -79,6 +79,8 @@ src/cloudpanel_backup/
     verify.py      quick and deep verification
     schedule.py    systemd and cron
     notify.py      Telegram, webhook, email
+    heartbeat.py   Healthchecks.io-style start/success/fail pings
+    lock.py        exclusive run lock (flock) for backup, restore and prune
     runner.py      subprocess wrapper (streaming gzip in and out)
     cli.py         command-line interface
 tests/             pytest suite with fake runner, fake S3 and temporary site trees
@@ -90,5 +92,10 @@ examples/          configs for R2, B2, AWS, rsync, an offline demo server, a res
 - Keep each pull request focused on one change.
 - Describe what changed and why, and how you tested it.
 - Do not bump the version number; that happens at release time.
+
+## Code of conduct
+
+Everyone taking part in this project is expected to follow the [Code of Conduct](CODE_OF_CONDUCT.md). Please report
+unacceptable behaviour as described there.
 
 By contributing you agree that your work is released under the MIT License.
